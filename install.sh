@@ -1,5 +1,5 @@
 #!/bin/bash
-# Install ComfyUI websockets-based client API for Autodesk Flame / Flare
+# Install script of ComfyUI Websockets-based client for Autodesk Flame / Flare
 
 AUTODESK_PATH='/opt/Autodesk/'
 PYBOX_DIR="$AUTODESK_PATH/shared/presets/pybox"
@@ -10,10 +10,10 @@ echo "____________________________________________________"
 
 echo "Installing additional required Python libraries..."
 pip=`find $AUTODESK_PATH/python -name pip3`
-#eval '$pip install -r requirements.txt'
-echo "$pip install -r requirements.txt"
+eval '$pip install -r requirements.txt'
 
-echo "Copying Python module to $PYBOX_DIR"
-#cp comfyui_api_ws.api $PYBOX_DIR
+comfyui_client_filename=comfyui_client.py
+echo "Copying $comfyui_client_filename to $PYBOX_DIR"
+cp $comfyui_client_filename $PYBOX_DIR
 
 echo "Installation terminated" 
