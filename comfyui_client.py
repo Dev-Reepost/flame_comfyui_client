@@ -7,20 +7,90 @@
 #
 ###########################################################################
 
+import os
 import json
+import glob
+from enum import Enum
+from pathlib import Path
+from pprint import pprint
 import urllib.request
 import urllib.parse
 from urllib.error import URLError
-import websocket 
+import websocket
 
 
 COMFYUI_HOSTNAME = "192.168.1.14"
 COMFYUI_HOSTPORT = "8188"
 COMFYUI_SERVER_ADDRESS = COMFYUI_HOSTNAME + ':' + COMFYUI_HOSTPORT
+COMFYUI_DIR = "002_COMFYUI"
 
-PROGRESS = "progress"
-EXECUTING = "executing"
-STATUS = "status"
+COMFYUI_SERVER_MOUNT_DIR_MAC = "/Volumes/silo2"
+COMFYUI_WORKING_DIR = str(Path(COMFYUI_SERVER_MOUNT_DIR_MAC) / COMFYUI_DIR)
+COMFYUI_WORKFLOWS_DIR = str(Path(COMFYUI_WORKING_DIR) / "workflows")
+COMFYUI_IO_DIR = {
+    "in": str(Path(COMFYUI_WORKING_DIR) / "in"), 
+    "out": str(Path(COMFYUI_WORKING_DIR) / "out") 
+}
+COMFYUI_INPUT_DIR = COMFYUI_IO_DIR["in"]
+COMFYUI_OUTPUT_DIR = COMFYUI_IO_DIR["out"]
+
+COMFYUI_SERVER_MOUNT_DIR_WIN = "S:"
+COMFYUI_SERVER_WORKING_DIR = str(Path(COMFYUI_SERVER_MOUNT_DIR_WIN) / COMFYUI_DIR)
+COMFYUI_SERVER_WORKFLOWS_DIR = str(Path(COMFYUI_SERVER_WORKING_DIR) / "workflows")
+COMFYUI_SERVER_IO_DIR = {
+    "in": str(Path(COMFYUI_SERVER_WORKING_DIR) / "in"),
+    "out": str(Path(COMFYUI_SERVER_WORKING_DIR) / "out")
+}
+COMFYUI_SERVER_INPUT_DIR = COMFYUI_SERVER_IO_DIR["in"]
+COMFYUI_SERVER_OUTPUT_DIR = COMFYUI_SERVER_IO_DIR["out"]
+
+COMFYUI_OUTPUT_DEFAULT_INITIAL_VERSION = 1
+
+COMFYUI_MODELS_EXCLUDED_DIRS = [
+    ".git", 
+    "doc", 
+    "tokenizer", 
+    "text_encoder", 
+    "unet", 
+    "scheduler"
+    ]
+COMFYUI_MODELS_FILETYPES = [
+    "safetensors", 
+    "ckpt",
+    "pth"
+    ]
+
+DEFAULT_IMAGE_FORMAT = "exr"
+
+class ComfyUIStatus(str, Enum):
+    PROGRESS = "progress"
+    EXECUTING = "executing"
+    EXECUTION_CACHED = "execution_cached"
+    STATUS = "status"
+    ERROR = "execution_error"
+
+class Side(str, Enum):
+    CLIENT = "Client"
+    SERVER = "Server"
+
+
+def find_models(root_dirs):
+    models = []
+    for model_path in root_dirs:
+        print("Searching for models in {}".format(model_path))
+        for _, dirs, files in os.walk(model_path):
+            dirs[:] = [d for d in dirs if d not in COMFYUI_MODELS_EXCLUDED_DIRS]
+            for filename in [f for f in files if f.endswith(tuple(COMFYUI_MODELS_FILETYPES))]:
+                print("Found {} model".format(filename))
+                models.append(filename)
+    return list(set(models))
+
+
+def list_files(dir, basename, layer="*", frame="*", version="*", extension=DEFAULT_IMAGE_FORMAT):
+    basename_pattern = "_".join([basename, layer, frame, version])
+    filepath_pattern = str(Path(dir) / (basename_pattern + '_.' + extension))
+    filepaths = glob.glob(filepath_pattern)
+    return filepaths
 
 
 def queue_prompt(prompt, client_id, server_address=COMFYUI_SERVER_ADDRESS):
@@ -37,15 +107,11 @@ def queue_prompt(prompt, client_id, server_address=COMFYUI_SERVER_ADDRESS):
         print("Error - Invalid URL {}".format(url))
     return {}
 
+
 def get_history(prompt_id, server_address=COMFYUI_SERVER_ADDRESS):
     with urllib.request.urlopen("http://{}/history/{}".format(server_address, prompt_id)) as response:
         return json.loads(response.read())
 
-def get_image(filename, subfolder, folder_type, server_address=COMFYUI_SERVER_ADDRESS):
-    data = {"filename": filename, "subfolder": subfolder, "type": folder_type}
-    url_values = urllib.parse.urlencode(data)
-    with urllib.request.urlopen("http://{}/view?{}".format(server_address, url_values)) as response:
-        return response.read()
 
 def interrupt_execution(prompt, client_id, server_address=COMFYUI_SERVER_ADDRESS):
     url = "http://{}/interrupt".format(server_address)
@@ -58,57 +124,51 @@ def interrupt_execution(prompt, client_id, server_address=COMFYUI_SERVER_ADDRESS
         response = json.loads(r)
     return response
 
+
 def pull_message(ws):
     out = ws.recv()
     if isinstance(out, str):
-        message = json.loads(out) 
-        return message
+        return json.loads(out) 
     return {}
+    
     
 def prompt_execution(server_address, client_id, prompt_id):
     def queue_size(message):
         return int(message['data']["status"]["exec_info"]["queue_remaining"]) 
     
-    message_status = "" 
+    message = {
+        "server": {},
+        "node": {},
+        "node_info": {}
+    } 
     try:
-        url = "ws://{}/ws?clientId={}".format(server_address, client_id)
-        print("Connecting to {}".format(url))
+        url = "ws://{}/ws?clientId={}&promptId={}".format(server_address, client_id, prompt_id)
         ws = websocket.WebSocket()
         ws.connect(url)
-        message_status = pull_message(ws)
-        print("message {}".format(message_status))
-        if queue_size(message_status) > 0:
-            message_executing = pull_message(ws)
-            print("message {}".format(message_executing))
-            message_progress = pull_message(ws)
-            print("message {}".format(message_progress))
+        print("Requesting {}".format(url))
+        message["server"] = pull_message(ws)
+        if queue_size(message["server"]) > 0:    
+            message["node"] = pull_message(ws)
+            message["node_info"] = pull_message(ws)
     except ConnectionRefusedError:
-        print("Connection refused at URL {}".format(url))
+        print("Pulling message from server failed")
         return {}
-    message = message_status
-    response = {
-        "executing": False,
-        "message": message
-        }
-    if message:
-        response["message"] = message
-        if message['type'] == EXECUTING:
-            data = message['data']
-            if data['node'] is not None:
-                response["executing"] = True
-        elif message['type'] == PROGRESS:
-            data = message['data']
-            if data['prompt_id'] == prompt_id:
-                response["executing"] = True
-        elif message['type'] == STATUS:
-            if queue_size(message) > 0:                
-                response["executing"] = True
-    return response
+    if message["node_info"] and message["node_info"]['type'] == ComfyUIStatus.ERROR:
+        print("Workflow execution on server failed")
+        pprint(message["node_info"])
+        return {}
+    return message
+
+
+def get_image(filename, subfolder, folder_type, server_address=COMFYUI_SERVER_ADDRESS):
+    data = {"filename": filename, "subfolder": subfolder, "type": folder_type}
+    url_values = urllib.parse.urlencode(data)
+    with urllib.request.urlopen("http://{}/view?{}".format(server_address, url_values)) as response:
+        return response.read()
 
 
 def get_images(ws, prompt, server_address=COMFYUI_SERVER_ADDRESS):
     prompt_id = queue_prompt(prompt, server_address=server_address)['prompt_id']
-    
     while True:
         out = ws.recv()
         if isinstance(out, str):
@@ -116,10 +176,9 @@ def get_images(ws, prompt, server_address=COMFYUI_SERVER_ADDRESS):
             if message['type'] == 'executing':
                 data = message['data']
                 if data['node'] is None and data['prompt_id'] == prompt_id:
-                    break # Execution is doen
+                    break 
         else:
-            continue # previews are binary data
-    
+            continue 
     output_images = {}
     history = get_history(prompt_id, server_address)[prompt_id]
     for o in history['outputs']:
@@ -132,12 +191,3 @@ def get_images(ws, prompt, server_address=COMFYUI_SERVER_ADDRESS):
                     images_output.append(image_data)
             output_images[node_id] = images_output
     return history
-
-#Commented out code to display the output images:
-# for node_id in images:
-#     for image_data in images[node_id]:
-#         from PIL import Image
-#         import io
-#         image = Image.open(io.BytesIO(image_data))
-#         image.show()
-
